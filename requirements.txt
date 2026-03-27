@@ -1,5 +1,16 @@
 # Core dependencies
 numpy>=1.20.0
+torch>=2.0.0
+pandas>=1.5.0
+tqdm>=4.65.0
+
+# ESM-2 for protein embeddings
+fair-esm>=2.0.0
+transformers>=4.30.0
+
+# Chemistry
+rdkit>=2023.3.1
+crem>=0.2.6
 
 # Development dependencies
 pytest>=7.0.0

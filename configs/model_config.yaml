@@ -1,0 +1,21 @@
+# GlueBind Model Configuration
+
+model:
+  protein_dim: 1280        # ESM-2 embedding dimension
+  mol_dim: 2048            # Morgan fingerprint dimension
+  hidden_dim: 256          # Model hidden dimension
+  dropout: 0.3             # Dropout probability
+  n_heads: 8               # Attention heads
+
+training:
+  batch_size: 128
+  learning_rate: 0.0001
+  num_epochs: 100
+  early_stopping_patience: 10
+  pos_weight: 4            # For weighted BCE
+
+data:
+  esm_model: "facebook/esm2_t33_650M_UR50D"
+  morgan_radius: 2
+  morgan_nbits: 2048
+  train_val_test_split: [0.7, 0.15, 0.15]

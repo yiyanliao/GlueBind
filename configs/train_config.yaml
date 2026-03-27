@@ -1,0 +1,16 @@
+# Training Configuration
+
+experiment_name: "gluebind_v1"
+seed: 42
+
+device: "cuda"  # or "cpu"
+
+logging:
+  use_wandb: true
+  project_name: "gluebind"
+  log_interval: 10
+
+checkpoint:
+  save_dir: "checkpoints"
+  save_best_only: true
+  save_interval: 5

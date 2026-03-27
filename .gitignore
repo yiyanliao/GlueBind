@@ -1,3 +1,4 @@
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -18,17 +19,25 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# Virtual environments
 venv/
 ENV/
 env/
 .venv
+
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+
+# Jupyter Notebook
 .ipynb_checkpoints/
 *.ipynb
+
+# Model checkpoints and data
 *.pth
 *.pt
 *.ckpt
@@ -36,11 +45,26 @@ env/
 *.pkl
 *.pickle
 checkpoints/
-data/
-datasets/
+models/
+
+# Logs
 *.log
 logs/
+wandb/
+
+# Environment variables
 .env
 .env.local
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Large files
+data/*.db
+data/*.db.gz
+dataset/*.pt
+dataset/*.json
+
+# Backup
+src_backup/

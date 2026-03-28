@@ -13,18 +13,22 @@ from sklearn.metrics import roc_auc_score, average_precision_score
 from gluebind.models.gluebind_model import GlueBindModel
 from gluebind.data.dataset import TernaryDataset
 import torch.nn.functional as F
+from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class FocalLoss(nn.Module):
-    """解决 1:4 极度不平衡与 Hard Decoys 困难样本的自适应损失函数"""
+    """解决 1:4 极度不平衡与 Hard Decoys 困难样本的自适应损失函数 (支持 AMP Logits)"""
     def __init__(self, alpha=0.8, gamma=2.0):
         super(FocalLoss, self).__init__()
         self.alpha = alpha # 控制正负样本比例
         self.gamma = gamma # 控制困难样本权重
 
     def forward(self, inputs, targets):
-        bce_loss = F.binary_cross_entropy(inputs, targets, reduction='none')
+        # inputs 现在是 logits，使用更安全的 _with_logits 版本
+        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        
+        # 计算 focal loss 权重
         pt = torch.exp(-bce_loss)
         alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
         focal_loss = alpha_t * (1 - pt) ** self.gamma * bce_loss
@@ -81,12 +85,12 @@ def train_model():
 
     # 性能解除封印：增大 Batch Size，开启 4 个 worker 多进程加载，并启用 pin_memory 加速 CPU->GPU 传输
     # 注意：如果 128 爆显存 (OOM)，可以改回 64。如果显存还空很多，可以拉到 256。
-    BATCH_SIZE = 128
-    NUM_WORKERS = 1
+    BATCH_SIZE = 256
+    NUM_WORKERS = 4
     
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True, collate_fn=ternary_collate_fn, num_workers=NUM_WORKERS, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=ternary_collate_fn, num_workers=NUM_WORKERS, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=ternary_collate_fn, num_workers=NUM_WORKERS, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True, collate_fn=ternary_collate_fn, num_workers=NUM_WORKERS, pin_memory=True, prefetch_factor=4)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=ternary_collate_fn, num_workers=NUM_WORKERS, pin_memory=True, prefetch_factor=4)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=ternary_collate_fn, num_workers=NUM_WORKERS, pin_memory=True, prefetch_factor=4)
     logging.info(f"数据加载完毕。训练集/验证集/测试集 Batch 数: {len(train_loader)} / {len(val_loader)} / {len(test_loader)}")
 
     # 4. 初始化硬件和模型
@@ -99,6 +103,9 @@ def train_model():
     criterion = FocalLoss(alpha=0.8, gamma=2.0)
     optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
 
+    # 【提速核武器】初始化 AMP 梯度缩放器 (加速计算，显存减半)
+    scaler = torch.amp.GradScaler('cuda')
+
     # 5. 训练循环与早停机制 (Early Stopping)
     num_epochs = 50
     patience = 10
@@ -106,13 +113,16 @@ def train_model():
     epochs_no_improve = 0
     best_model_path = "dataset/gluebind_model.pth"
     
-    logging.info("开始多模态深度模型训练 (引入 Focal Loss 与早停)...")
+    logging.info("开始多模态深度模型训练 (引入 AMP 加速, Focal Loss 与早停)...")
     
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0.0
         
-        for batch_idx, (t_esm, t_mask, l_esm, l_mask, m_fp, labels) in enumerate(train_loader):
+        # 包装 tqdm 进度条
+        progress_bar = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{num_epochs}] Train", leave=False)
+        
+        for batch_idx, (t_esm, t_mask, l_esm, l_mask, m_fp, labels) in enumerate(progress_bar):
             # 将数据推到 GPU
             t_esm, t_mask = t_esm.to(device), t_mask.to(device)
             l_esm, l_mask = l_esm.to(device), l_mask.to(device)
@@ -120,18 +130,23 @@ def train_model():
             
             optimizer.zero_grad()
             
-            # 前向传播 (带入掩码)
-            preds = model(t_esm, t_mask, l_esm, l_mask, m_fp)
-            loss = criterion(preds, labels)
+            # 【提速核武器】开启自动混合精度前向传播
+            with torch.amp.autocast('cuda'):
+                preds = model(t_esm, t_mask, l_esm, l_mask, m_fp)
+                loss = criterion(preds, labels)
             
-            # 反向传播
-            loss.backward()
-            optimizer.step()
+            # 【提速核武器】反向传播与缩放
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
             total_loss += loss.item()
+            
+            # 实时更新 tqdm 进度条上的 Loss 信息
+            progress_bar.set_postfix({'loss': f"{loss.item():.4f}"})
 
         avg_train_loss = total_loss / len(train_loader)
-        
+
         # 验证循环
         model.eval()
         val_loss = 0.0
@@ -144,12 +159,13 @@ def train_model():
                 l_esm, l_mask = l_esm.to(device), l_mask.to(device)
                 m_fp, labels = m_fp.to(device), labels.to(device)
                 
-                preds = model(t_esm, t_mask, l_esm, l_mask, m_fp)
-                loss = criterion(preds, labels)
+                logits = model(t_esm, t_mask, l_esm, l_mask, m_fp)
+                loss = criterion(logits, labels)
                 val_loss += loss.item()
                 
-                # 收集真实值和预测概率用于计算 AUC 和 AUPRC
-                all_preds.extend(preds.cpu().numpy())
+                # 收集真实值和预测概率 (通过 sigmoid 将 logits 转回 0-1 概率) 用于计算 AUC 和 AUPRC
+                probs = torch.sigmoid(logits)
+                all_preds.extend(probs.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
 
         avg_val_loss = val_loss / len(val_loader) if len(val_loader) > 0 else 0
@@ -187,8 +203,9 @@ def train_model():
             l_esm, l_mask = l_esm.to(device), l_mask.to(device)
             m_fp, labels = m_fp.to(device), labels.to(device)
             
-            preds = model(t_esm, t_mask, l_esm, l_mask, m_fp)
-            test_preds.extend(preds.cpu().numpy())
+            logits = model(t_esm, t_mask, l_esm, l_mask, m_fp)
+            probs = torch.sigmoid(logits)
+            test_preds.extend(probs.cpu().numpy())
             test_labels.extend(labels.cpu().numpy())
 
     try:
